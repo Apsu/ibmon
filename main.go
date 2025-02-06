@@ -1,189 +1,222 @@
 package main
 
 import (
-        "flag"
-        "fmt"
-        "log"
-        "os"
-        "strconv"
-        "strings"
-        "time"
-
-        "github.com/bitfield/script"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 )
 
-// IBAdaptor holds information about an InfiniBand adaptor to monitor.
+// IBAdaptor holds information about an InfiniBand port to monitor.
 type IBAdaptor struct {
-        Name     string
-        rxPath   string
-        txPath   string
-        ratePath string
-        prevRx   int64
-        prevTx   int64
-        portRate string // e.g., "400 Gbps"
+	// Name is a composite of the adaptor name and port number, e.g. "mlx5_0.1"
+	Name string
+	// Full paths to the sysfs files.
+	rxPath   string
+	txPath   string
+	ratePath string
+	// Previous counter values to compute differences.
+	prevRx int64
+	prevTx int64
+	// portRate is a human-readable rate (e.g., "400 Gbps").
+	portRate string
 }
 
-// readCounter reads a sysfs counter file and converts its content to int64.
+// readCounter opens a file (whose content is expected to be an integer),
+// trims whitespace, and returns its int64 value.
 func readCounter(path string) (int64, error) {
-        s := script.File(path)
-        content, err := s.String()
-        if err != nil {
-                return 0, err
-        }
-        return strconv.ParseInt(strings.TrimSpace(content), 10, 64)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	s := strings.TrimSpace(string(data))
+	return strconv.ParseInt(s, 10, 64)
 }
 
-// readRate reads the port rate from the given file and returns a formatted string.
-// For example, if the file contains: "400 Gb/sec (4X NDR)", this extracts "400 Gbps".
+// readRate reads the port rate from a file and massages it into a compact format.
 func readRate(path string) (string, error) {
-        s := script.File(path)
-        content, err := s.String()
-        if err != nil {
-                return "", err
-        }
-        content = strings.TrimSpace(content)
-        fields := strings.Fields(content)
-        if len(fields) >= 2 {
-                // Replace "Gb/sec" with "Gbps" for a more compact header.
-                rate := fmt.Sprintf("%s %s", fields[0], fields[1])
-                rate = strings.Replace(rate, "Gb/sec", "Gbps", 1)
-                return rate, nil
-        }
-        return content, nil
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	s := strings.TrimSpace(string(data))
+	fields := strings.Fields(s)
+	if len(fields) >= 2 {
+		// For example, "400 Gb/sec" becomes "400 Gbps".
+		rate := fmt.Sprintf("%s %s", fields[0], fields[1])
+		return strings.Replace(rate, "Gb/sec", "Gbps", 1), nil
+	}
+	return s, nil
+}
+
+// collectAdaptors walks the /sys/class/infiniband tree, looking for adaptor port files.
+func collectAdaptors(ibPath string) ([]IBAdaptor, error) {
+	var adaptors []IBAdaptor
+
+	// List all entries in /sys/class/infiniband.
+	adaptorEntries, err := os.ReadDir(ibPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", ibPath, err)
+	}
+
+	for _, adaptorEntry := range adaptorEntries {
+		if !adaptorEntry.IsDir() {
+			continue
+		}
+		adaptorName := adaptorEntry.Name()
+		adaptorDir := filepath.Join(ibPath, adaptorName)
+
+		// Look for the "ports" subdirectory.
+		portsDir := filepath.Join(adaptorDir, "ports")
+		portsEntries, err := os.ReadDir(portsDir)
+		if err != nil {
+			log.Printf("Skipping adaptor %s: cannot read ports directory: %v", adaptorName, err)
+			continue
+		}
+
+		// Process each port directory.
+		for _, portEntry := range portsEntries {
+			if !portEntry.IsDir() {
+				continue
+			}
+			portName := portEntry.Name() // e.g. "1", "2", etc.
+			// Build the full paths for the expected files.
+			rxPath := filepath.Join(adaptorDir, "ports", portName, "counters", "port_rcv_data")
+			txPath := filepath.Join(adaptorDir, "ports", portName, "counters", "port_xmit_data")
+			ratePath := filepath.Join(adaptorDir, "ports", portName, "rate")
+
+			// Ensure the RX and TX counter files exist.
+			if _, err := os.Stat(rxPath); err != nil {
+				if !os.IsNotExist(err) {
+					log.Printf("Skipping %s port %s: cannot access %s: %v", adaptorName, portName, rxPath, err)
+				}
+				continue
+			}
+			if _, err := os.Stat(txPath); err != nil {
+				if !os.IsNotExist(err) {
+					log.Printf("Skipping %s port %s: cannot access %s: %v", adaptorName, portName, txPath, err)
+				}
+				continue
+			}
+
+			// Read initial counter values.
+			prevRx, err := readCounter(rxPath)
+			if err != nil {
+				log.Printf("Skipping %s port %s: error reading RX counter: %v", adaptorName, portName, err)
+				continue
+			}
+			prevTx, err := readCounter(txPath)
+			if err != nil {
+				log.Printf("Skipping %s port %s: error reading TX counter: %v", adaptorName, portName, err)
+				continue
+			}
+
+			// Read the port rate if available.
+			portRate := "N/A"
+			if info, err := os.Stat(ratePath); err == nil && !info.IsDir() {
+				if rate, err := readRate(ratePath); err == nil {
+					portRate = rate
+				} else {
+					portRate = "?"
+				}
+			}
+
+			// Create a composite name like "mlx5_0.1" (adaptor.port).
+			compositeName := fmt.Sprintf("%s.%s", adaptorName, portName)
+			adaptor := IBAdaptor{
+				Name:     compositeName,
+				rxPath:   rxPath,
+				txPath:   txPath,
+				ratePath: ratePath,
+				prevRx:   prevRx,
+				prevTx:   prevTx,
+				portRate: portRate,
+			}
+			adaptors = append(adaptors, adaptor)
+		}
+	}
+
+	return adaptors, nil
 }
 
 func main() {
-        // Flags: polling interval and adaptors to ignore.
-        interval := flag.Duration("interval", 1*time.Second, "Interval between readings")
-        ignoreFlag := flag.String("ignore", "", "Comma-separated list of adaptors to ignore")
-        flag.Parse()
+	// Flags: polling interval and adaptors to ignore.
+	interval := flag.Duration("interval", 1*time.Second, "Interval between readings")
+	ignoreFlag := flag.String("ignore", "", "Comma-separated list of adaptor ports to ignore (e.g., mlx5_0.1,mlx5_0.2)")
+	flag.Parse()
 
-        // Build a map of adaptor names to ignore.
-        ignoreMap := make(map[string]bool)
-        if *ignoreFlag != "" {
-                for _, name := range strings.Split(*ignoreFlag, ",") {
-                        if trimmed := strings.TrimSpace(name); trimmed != "" {
-                                ignoreMap[trimmed] = true
-                        }
-                }
-        }
+	// Build a map of adaptor names to ignore.
+	ignoreMap := make(map[string]bool)
+	if *ignoreFlag != "" {
+		for _, name := range strings.Split(*ignoreFlag, ",") {
+			if trimmed := strings.TrimSpace(name); trimmed != "" {
+				ignoreMap[trimmed] = true
+			}
+		}
+	}
 
-        ibPath := "/sys/class/infiniband"
-        entries, err := os.ReadDir(ibPath)
-        if err != nil {
-                log.Fatalf("Error reading %s: %v", ibPath, err)
-        }
+	ibPath := "/sys/class/infiniband"
+	adaptors, err := collectAdaptors(ibPath)
+	if err != nil {
+		log.Fatalf("Error collecting adaptors: %v", err)
+	}
+	if len(adaptors) == 0 {
+		log.Fatal("No InfiniBand adaptors found.")
+	}
 
-        var adaptors []IBAdaptor
-        for _, entry := range entries {
-                name := entry.Name()
-                if ignoreMap[name] {
-                        log.Printf("Ignoring adaptor %s", name)
-                        continue
-                }
-                fullPath := fmt.Sprintf("%s/%s", ibPath, name)
-                fi, err := os.Stat(fullPath) // follows symlinks
-                if err != nil {
-                        log.Printf("Error stating %s: %v", fullPath, err)
-                        continue
-                }
-                if !fi.IsDir() {
-                        log.Printf("Skipping %s: not a directory", fullPath)
-                        continue
-                }
+	// Filter out adaptors specified in the ignore flag.
+	var filtered []IBAdaptor
+	for _, a := range adaptors {
+		if ignoreMap[a.Name] {
+			log.Printf("Ignoring adaptor %s", a.Name)
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+	adaptors = filtered
 
-                // Build file paths for port 1.
-                rxPath := fmt.Sprintf("%s/%s/ports/1/counters/port_rcv_data", ibPath, name)
-                txPath := fmt.Sprintf("%s/%s/ports/1/counters/port_xmit_data", ibPath, name)
-                ratePath := fmt.Sprintf("%s/%s/ports/1/rate", ibPath, name)
+	// Print header: time and one column per adaptor port.
+	fmt.Printf("%-8s", "Time")
+	for _, a := range adaptors {
+		fmt.Printf(" | %-14s", fmt.Sprintf("%s(%s)", a.Name, a.portRate))
+	}
+	fmt.Println()
+	fmt.Println(strings.Repeat("-", 8+len(adaptors)*18))
 
-                // Ensure counter files exist.
-                if _, err := os.Stat(rxPath); err != nil {
-                        log.Printf("Skipping adaptor %s, cannot access %s", name, rxPath)
-                        continue
-                }
-                if _, err := os.Stat(txPath); err != nil {
-                        log.Printf("Skipping adaptor %s, cannot access %s", name, txPath)
-                        continue
-                }
+	// Main polling loop.
+	for {
+		time.Sleep(*interval)
+		timestamp := time.Now().Format("15:04:05")
+		fmt.Printf("%-8s", timestamp)
+		for i, a := range adaptors {
+			currRx, err := readCounter(a.rxPath)
+			if err != nil {
+				log.Printf("Error reading RX for %s: %v", a.Name, err)
+				continue
+			}
+			currTx, err := readCounter(a.txPath)
+			if err != nil {
+				log.Printf("Error reading TX for %s: %v", a.Name, err)
+				continue
+			}
 
-                prevRx, err := readCounter(rxPath)
-                if err != nil {
-                        log.Printf("Error reading RX counter for %s: %v", name, err)
-                        continue
-                }
-                prevTx, err := readCounter(txPath)
-                if err != nil {
-                        log.Printf("Error reading TX counter for %s: %v", name, err)
-                        continue
-                }
+			// Compute differences (bytes transferred during the interval).
+			diffRx := currRx - a.prevRx
+			diffTx := currTx - a.prevTx
+			adaptors[i].prevRx = currRx
+			adaptors[i].prevTx = currTx
 
-                var portRate string
-                if _, err := os.Stat(ratePath); err == nil {
-                        portRate, err = readRate(ratePath)
-                        if err != nil {
-                                log.Printf("Error reading rate for %s: %v", name, err)
-                                portRate = "?"
-                        }
-                } else {
-                        portRate = "N/A"
-                }
+			// Convert bytes/s to Gbps: (bytes/s * 8) / 1e9.
+			rxGbps := float64(diffRx) * 8 / 1e9 / (*interval).Seconds()
+			txGbps := float64(diffTx) * 8 / 1e9 / (*interval).Seconds()
 
-                adaptors = append(adaptors, IBAdaptor{
-                        Name:     name,
-                        rxPath:   rxPath,
-                        txPath:   txPath,
-                        ratePath: ratePath,
-                        prevRx:   prevRx,
-                        prevTx:   prevTx,
-                        portRate: portRate,
-                })
-        }
-
-        if len(adaptors) == 0 {
-                log.Fatal("No InfiniBand adaptors found.")
-        }
-
-        // Print header: time and one column per adaptor.
-        fmt.Printf("%-8s", "Time")
-        for _, a := range adaptors {
-                // Display the adaptor name and its reported rate (now in compact "Gbps" form).
-                fmt.Printf(" | %-14s", fmt.Sprintf("%s(%s)", a.Name, a.portRate))
-        }
-        fmt.Println()
-        fmt.Println(strings.Repeat("-", 8+len(adaptors)*18))
-
-        // Main loop: on each interval, compute and display throughput.
-        for {
-                time.Sleep(*interval)
-                timestamp := time.Now().Format("15:04:05")
-                fmt.Printf("%-8s", timestamp)
-                for i, a := range adaptors {
-                        currRx, err := readCounter(a.rxPath)
-                        if err != nil {
-                                log.Printf("Error reading RX for %s: %v", a.Name, err)
-                                continue
-                        }
-                        currTx, err := readCounter(a.txPath)
-                        if err != nil {
-                                log.Printf("Error reading TX for %s: %v", a.Name, err)
-                                continue
-                        }
-
-                        // Compute differences (bytes transferred during the interval).
-                        diffRx := currRx - a.prevRx
-                        diffTx := currTx - a.prevTx
-                        adaptors[i].prevRx = currRx
-                        adaptors[i].prevTx = currTx
-
-                        // Convert bytes/s to Gbps:
-                        // (bytes/s * 8) / 1e9 = Gbps.
-                        rxGbps := float64(diffRx) * 8 / 1e9 / (*interval).Seconds()
-                        txGbps := float64(diffTx) * 8 / 1e9 / (*interval).Seconds()
-
-                        // Display with arrow symbols for RX (↑) and TX (↓) using 1 decimal.
-                        fmt.Printf(" |↑ % 6.1f/↓ % 6.1f", rxGbps, txGbps)
-                }
-                fmt.Println()
-        }
+			// Display with arrows for RX (↑) and TX (↓).
+			fmt.Printf(" |↑ % 6.1f/↓ % 6.1f", rxGbps, txGbps)
+		}
+		fmt.Println()
+	}
 }
