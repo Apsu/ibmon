@@ -47,8 +47,8 @@ func readRate(path string) (string, error) {
 	fields := strings.Fields(s)
 	if len(fields) >= 2 {
 		// For example, "400 Gb/sec" becomes "400 Gbps".
-		rate := fmt.Sprintf("%s %s", fields[0], fields[1])
-		return strings.Replace(rate, "Gb/sec", "Gbps", 1), nil
+		rate := fmt.Sprintf("%s%s", fields[0], fields[1])
+		return strings.Replace(rate, "Gb/sec", "G", 1), nil
 	}
 	return s, nil
 }
@@ -64,11 +64,20 @@ func collectAdaptors(ibPath string) ([]IBAdaptor, error) {
 	}
 
 	for _, adaptorEntry := range adaptorEntries {
-		if !adaptorEntry.IsDir() {
+		// The entries here might be symlinks; use os.Stat to follow them.
+		adaptorPath := filepath.Join(ibPath, adaptorEntry.Name())
+		info, err := os.Stat(adaptorPath)
+		if err != nil {
+			log.Printf("Unable to stat %s: %v", adaptorPath, err)
 			continue
 		}
+		if !info.IsDir() {
+			// Skip non-directories (or symlinks not pointing to directories).
+			continue
+		}
+
 		adaptorName := adaptorEntry.Name()
-		adaptorDir := filepath.Join(ibPath, adaptorName)
+		adaptorDir := adaptorPath // resolved adaptor directory
 
 		// Look for the "ports" subdirectory.
 		portsDir := filepath.Join(adaptorDir, "ports")
@@ -80,9 +89,17 @@ func collectAdaptors(ibPath string) ([]IBAdaptor, error) {
 
 		// Process each port directory.
 		for _, portEntry := range portsEntries {
-			if !portEntry.IsDir() {
+			// Typically these are real directories (or symlinks that resolve to directories).
+			portPath := filepath.Join(portsDir, portEntry.Name())
+			portInfo, err := os.Stat(portPath)
+			if err != nil {
+				log.Printf("Skipping port %s for adaptor %s: cannot stat port: %v", portEntry.Name(), adaptorName, err)
 				continue
 			}
+			if !portInfo.IsDir() {
+				continue
+			}
+
 			portName := portEntry.Name() // e.g. "1", "2", etc.
 			// Build the full paths for the expected files.
 			rxPath := filepath.Join(adaptorDir, "ports", portName, "counters", "port_rcv_data")
@@ -215,7 +232,7 @@ func main() {
 			txGbps := float64(diffTx) * 8 / 1e9 / (*interval).Seconds()
 
 			// Display with arrows for RX (↑) and TX (↓).
-			fmt.Printf(" |↑ % 6.1f/↓ % 6.1f", rxGbps, txGbps)
+			fmt.Printf(" | ↑ % 3.1f/ ↓ % 3.1f", rxGbps, txGbps)
 		}
 		fmt.Println()
 	}
