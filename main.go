@@ -242,18 +242,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View renders one line per monitored interface (adaptor and port) with two horizontal bar graphs.
-// The available width for the bars is recalculated based on the current terminal width.
+// It recalculates the available width for the bars based on the current terminal width.
 func (m model) View() string {
 	var s string
 	for _, stat := range m.statuses {
-		// Row header: "adaptor:port (rate): " e.g. "mlx5_17:1 (200 Gbps (4X HDR)): "
-		header := fmt.Sprintf("%s:%s (%s): ", stat.iface.Adaptor, stat.iface.Port, stat.iface.rateStr)
+		// Build the header.
+		// First, create the device:port string (e.g. "mlx5_0:1") and pad it to 10 characters.
+		headerBase := fmt.Sprintf("%s:%s", stat.iface.Adaptor, stat.iface.Port)
+		paddedHeader := fmt.Sprintf("%-10s", headerBase)
+		// Then append the rate in parentheses.
+		header := fmt.Sprintf("%s (%s): ", paddedHeader, stat.iface.rateStr)
 		headerWidth := lipgloss.Width(header)
 
-		// Reserve fixed space for the non-bar parts.
-		// For RX: "↑ " (2) + one space (1) + percentage (5) + one space (1) + throughput (10) = 19.
-		// For TX: "   ↓ " (5) + one space (1) + percentage (5) + one space (1) + throughput (10) = 22.
-		const fixed = 19 + 22 // total 41
+		// Reserve fixed space for the non-bar parts:
+		// For RX: "↑ " (2) + percentage (5) + " " (1) + throughput (10) = 18.
+		// For TX: "   ↓ " (5) + percentage (5) + " " (1) + throughput (10) = 21.
+		const fixed = 18 + 21 // total 39
 		available := m.termWidth - headerWidth - fixed
 		if available < 10 {
 			available = 10
@@ -309,7 +313,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// You can remove tea.WithAltScreen() if you prefer to stay in your normal terminal.
+	// Remove tea.WithAltScreen() if you prefer not to use the alternate screen.
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		log.Fatal(err)
