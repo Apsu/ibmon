@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -25,7 +26,7 @@ type IBInterface struct {
 	prevRx   int64
 	prevTx   int64
 	maxGbps  float64 // parsed maximum bandwidth in Gbps
-	rateStr  string  // display string (e.g. "400 Gbps")
+	rateStr  string  // display string (e.g. "400 Gbps (4X HDR)")
 }
 
 // readCounter reads a counter file and returns its value.
@@ -157,6 +158,7 @@ type model struct {
 	statuses  []ifaceStatus
 	interval  time.Duration
 	termWidth int // current terminal width
+	vp        viewport.Model
 }
 
 // tickMsg is our message type for periodic ticks.
@@ -186,78 +188,33 @@ func initialModel(interval time.Duration, ignoreList map[string]bool) (model, er
 			txValue: 0,
 		})
 	}
-	// Default terminal width; will be updated via tea.WindowSizeMsg.
+	// Create a default viewport. Its dimensions will be updated when a WindowSizeMsg is received.
+	vp := viewport.New(80, 20)
 	return model{
 		statuses:  statuses,
 		interval:  interval,
 		termWidth: 80,
+		vp:        vp,
 	}, nil
 }
 
-func (m model) Init() tea.Cmd {
-	return tea.Batch(tick(m.interval))
-}
-
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-
-	case tickMsg:
-		// For each interface, update counters and compute throughputs.
-		for i, s := range m.statuses {
-			currRx, err := readCounter(s.iface.rxPath)
-			if err != nil {
-				continue
-			}
-			currTx, err := readCounter(s.iface.txPath)
-			if err != nil {
-				continue
-			}
-			diffRx := currRx - s.iface.prevRx
-			diffTx := currTx - s.iface.prevTx
-
-			// Update previous counters.
-			m.statuses[i].iface.prevRx = currRx
-			m.statuses[i].iface.prevTx = currTx
-
-			// Convert byte differences to Gbps: (bytes/s * 8) / 1e9.
-			rxGbps := float64(diffRx) * 8 / 1e9 / m.interval.Seconds()
-			txGbps := float64(diffTx) * 8 / 1e9 / m.interval.Seconds()
-			m.statuses[i].rxValue = rxGbps
-			m.statuses[i].txValue = txGbps
-		}
-		return m, tick(m.interval)
-
-	case tea.WindowSizeMsg:
-		// Update terminal width on resize.
-		m.termWidth = msg.Width
-		return m, nil
-
-	case tea.KeyMsg:
-		// Quit on "q" or Ctrl+C.
-		if msg.String() == "q" || msg.String() == "ctrl+c" {
-			return m, tea.Quit
-		}
-	}
-	return m, nil
-}
-
-// View renders one line per monitored interface (adaptor and port) with two horizontal bar graphs.
-// It recalculates the available width for the bars based on the current terminal width.
-func (m model) View() string {
+// renderContent builds the main content to be displayed (all rows plus a footer with keybinds).
+func (m model) renderContent() string {
 	var s string
+	// For each interface, build a row.
 	for _, stat := range m.statuses {
 		// Build the header.
-		// First, create the device:port string (e.g. "mlx5_0:1") and pad it to 10 characters.
+		// Create the device:port string (e.g. "mlx5_0:1") and pad it to 10 characters.
 		headerBase := fmt.Sprintf("%s:%s", stat.iface.Adaptor, stat.iface.Port)
 		paddedHeader := fmt.Sprintf("%-10s", headerBase)
-		// Then append the rate in parentheses.
+		// Append the rate in parentheses.
 		header := fmt.Sprintf("%s (%s): ", paddedHeader, stat.iface.rateStr)
 		headerWidth := lipgloss.Width(header)
 
-		// Reserve fixed space for the non-bar parts:
-		// For RX: "↑ " (2) + percentage (5) + " " (1) + throughput (10) = 18.
-		// For TX: "   ↓ " (5) + percentage (5) + " " (1) + throughput (10) = 21.
-		const fixed = 18 + 21 // total 39
+		// Reserve fixed space for non-bar parts:
+		// RX: "↑ " (2) + percentage (5) + " " (1) + throughput (11) = 19.
+		// TX: "   ↓ " (5) + percentage (5) + " " (1) + throughput (11) = 22.
+		const fixed = 19 + 22 // total 41
 		available := m.termWidth - headerWidth - fixed
 		if available < 10 {
 			available = 10
@@ -286,15 +243,87 @@ func (m model) View() string {
 		// Format the percentage and throughput values.
 		rxPctStr := fmt.Sprintf("%4d%%", int(rxPct*100))
 		txPctStr := fmt.Sprintf("%4d%%", int(txPct*100))
-		rxVal := fmt.Sprintf("%05.1f Gbps", stat.rxValue)
-		txVal := fmt.Sprintf("%05.1f Gbps", stat.txValue)
+		// Use a throughput field that is 11 characters wide (e.g. "0000.0 Gbps")
+		rxVal := fmt.Sprintf("%07.1f Gbps", stat.rxValue)
+		txVal := fmt.Sprintf("%07.1f Gbps", stat.txValue)
 
 		// Build the row:
 		// [header] + "↑ " + [rxBar] + " " + [rxPctStr] + " " + [rxVal] + "   ↓ " + [txBar] + " " + [txPctStr] + " " + [txVal]
 		line := header + fmt.Sprintf("↑ %s %s %s   ↓ %s %s %s", rxBar.View(), rxPctStr, rxVal, txBar.View(), txPctStr, txVal)
 		s += line + "\n"
 	}
-	return s
+	// Append a footer with key instructions.
+	footer := "\n[q/ctrl+c to quit | ↑/↓ to scroll]"
+	return s + footer
+}
+
+func (m model) Init() tea.Cmd {
+	return tea.Batch(tick(m.interval))
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	switch msg := msg.(type) {
+
+	case tickMsg:
+		// For each interface, update counters and compute throughputs.
+		for i, s := range m.statuses {
+			currRx, err := readCounter(s.iface.rxPath)
+			if err != nil {
+				continue
+			}
+			currTx, err := readCounter(s.iface.txPath)
+			if err != nil {
+				continue
+			}
+			diffRx := currRx - s.iface.prevRx
+			diffTx := currTx - s.iface.prevTx
+
+			// Update previous counters.
+			m.statuses[i].iface.prevRx = currRx
+			m.statuses[i].iface.prevTx = currTx
+
+			// Convert byte differences to Gbps: (bytes/s * 8) / 1e9.
+			rxGbps := float64(diffRx) * 8 / 1e9 / m.interval.Seconds()
+			txGbps := float64(diffTx) * 8 / 1e9 / m.interval.Seconds()
+			m.statuses[i].rxValue = rxGbps
+			m.statuses[i].txValue = txGbps
+		}
+		// Update the viewport content.
+		m.vp.SetContent(m.renderContent())
+		cmds = append(cmds, tick(m.interval))
+
+	case tea.WindowSizeMsg:
+		m.termWidth = msg.Width
+		// Set viewport size: full width and leave 2 lines for padding.
+		m.vp.Width = msg.Width
+		m.vp.Height = msg.Height - 2
+		m.vp.SetContent(m.renderContent())
+		return m, nil
+
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "q", "ctrl+c":
+			return m, tea.Quit
+		default:
+			// Pass other key messages (like arrow keys) to the viewport.
+			var cmd tea.Cmd
+			m.vp, cmd = m.vp.Update(msg)
+			cmds = append(cmds, cmd)
+		}
+	}
+	// Also update the viewport with any messages.
+	var vpCmd tea.Cmd
+	m.vp, vpCmd = m.vp.Update(msg)
+	cmds = append(cmds, vpCmd)
+
+	return m, tea.Batch(cmds...)
+}
+
+func (m model) View() string {
+	// Render the viewport content.
+	return m.vp.View()
 }
 
 func main() {
@@ -313,7 +342,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Remove tea.WithAltScreen() if you prefer not to use the alternate screen.
+	// Use the alternate screen if desired; remove tea.WithAltScreen() to remain in the main terminal.
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		log.Fatal(err)
