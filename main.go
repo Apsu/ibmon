@@ -84,7 +84,6 @@ func getInterfaces(ignoreList map[string]bool) ([]IBInterface, error) {
 		portsDir := filepath.Join(adaptorPath, "ports")
 		portEntries, err := os.ReadDir(portsDir)
 		if err != nil {
-			// If there is no ports directory, skip this adaptor.
 			continue
 		}
 
@@ -246,15 +245,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // The available width for the bars is recalculated based on the current terminal width.
 func (m model) View() string {
 	var s string
-	// For each interface, build a row.
 	for _, stat := range m.statuses {
-		// Row header: "adaptor:port (rate): " e.g. "mlx5_1:1 (400 Gbps): "
+		// Row header: "adaptor:port (rate): " e.g. "mlx5_17:1 (200 Gbps (4X HDR)): "
 		header := fmt.Sprintf("%s:%s (%s): ", stat.iface.Adaptor, stat.iface.Port, stat.iface.rateStr)
 		headerWidth := lipgloss.Width(header)
 
-		// Fixed overhead for arrows and numeric values:
-		// "↑ " (2) + numeric RX value (10) + "   ↓ " (5) + numeric TX value (10) = 2+10+5+10 = 27.
-		const fixed = 27
+		// Reserve fixed space for the non-bar parts.
+		// For RX: "↑ " (2) + one space (1) + percentage (5) + one space (1) + throughput (10) = 19.
+		// For TX: "   ↓ " (5) + one space (1) + percentage (5) + one space (1) + throughput (10) = 22.
+		const fixed = 19 + 22 // total 41
 		available := m.termWidth - headerWidth - fixed
 		if available < 10 {
 			available = 10
@@ -280,12 +279,15 @@ func (m model) View() string {
 		rxBar.SetPercent(rxPct)
 		txBar.SetPercent(txPct)
 
-		// Format numeric throughput (zero-padded, one decimal).
+		// Format the percentage and throughput values.
+		rxPctStr := fmt.Sprintf("%4d%%", int(rxPct*100))
+		txPctStr := fmt.Sprintf("%4d%%", int(txPct*100))
 		rxVal := fmt.Sprintf("%05.1f Gbps", stat.rxValue)
 		txVal := fmt.Sprintf("%05.1f Gbps", stat.txValue)
 
-		// Build the row: header then arrows with progress bars and values.
-		line := header + fmt.Sprintf("↑ %s %s   ↓ %s %s", rxBar.View(), rxVal, txBar.View(), txVal)
+		// Build the row:
+		// [header] + "↑ " + [rxBar] + " " + [rxPctStr] + " " + [rxVal] + "   ↓ " + [txBar] + " " + [txPctStr] + " " + [txVal]
+		line := header + fmt.Sprintf("↑ %s %s %s   ↓ %s %s %s", rxBar.View(), rxPctStr, rxVal, txBar.View(), txPctStr, txVal)
 		s += line + "\n"
 	}
 	return s
@@ -307,7 +309,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Remove the alt screen option if you prefer not to use it.
+	// You can remove tea.WithAltScreen() if you prefer to stay in your normal terminal.
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		log.Fatal(err)
