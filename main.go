@@ -228,8 +228,8 @@ func (m model) renderContent() string {
 			}
 		}
 		// Create new progress bars with the computed width.
-		rxBar := progress.New(progress.WithGradient("#FF0000", "#00FF00"), progress.WithWidth(barWidth))
-		txBar := progress.New(progress.WithGradient("#FF0000", "#00FF00"), progress.WithWidth(barWidth))
+		rxBar := progress.New(progress.WithDefaultGradient(), progress.WithWidth(barWidth))
+		txBar := progress.New(progress.WithDefaultGradient(), progress.WithWidth(barWidth))
 
 		// Format percentage strings (5 characters, e.g. "  0%").
 		rxPctStr := fmt.Sprintf("%4d%%", int(rxPct*100))
