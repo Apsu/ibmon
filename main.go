@@ -230,8 +230,6 @@ func (m model) renderContent() string {
 		// Create new progress bars with the computed width.
 		rxBar := progress.New(progress.WithGradient("#FF0000", "#00FF00"), progress.WithWidth(barWidth))
 		txBar := progress.New(progress.WithGradient("#FF0000", "#00FF00"), progress.WithWidth(barWidth))
-		rxBar.SetPercent(rxPct)
-		txBar.SetPercent(txPct)
 
 		// Format percentage strings (5 characters, e.g. "  0%").
 		rxPctStr := fmt.Sprintf("%4d%%", int(rxPct*100))
@@ -242,7 +240,7 @@ func (m model) renderContent() string {
 
 		// Build the row:
 		// [header] + "↑ " + [rxBar] + " " + [rxPctStr] + " " + [rxVal] + "   ↓ " + [txBar] + " " + [txPctStr] + " " + [txVal]
-		line := header + fmt.Sprintf("↑ %s %s %s   ↓ %s %s %s", rxBar.View(), rxPctStr, rxVal, txBar.View(), txPctStr, txVal)
+		line := header + fmt.Sprintf("↑ %s %s %s   ↓ %s %s %s", rxBar.ViewAs(rxPct), rxPctStr, rxVal, txBar.ViewAs(txPct), txPctStr, txVal)
 		s += line + "\n"
 	}
 	return s
