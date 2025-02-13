@@ -227,10 +227,9 @@ func (m model) renderContent() string {
 				txPct = 1.0
 			}
 		}
-
 		// Create new progress bars with the computed width.
-		rxBar := progress.New(progress.WithDefaultGradient(), progress.WithWidth(barWidth))
-		txBar := progress.New(progress.WithDefaultGradient(), progress.WithWidth(barWidth))
+		rxBar := progress.New(progress.WithGradient("#FF0000", "#00FF00"), progress.WithWidth(barWidth))
+		txBar := progress.New(progress.WithGradient("#FF0000", "#00FF00"), progress.WithWidth(barWidth))
 		rxBar.SetPercent(rxPct)
 		txBar.SetPercent(txPct)
 
